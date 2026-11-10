@@ -443,7 +443,11 @@ jobs:
               $sourceImage.Dispose()
           }
 
-          $version = "${{ steps.meta.outputs.version }}"
+          $rawVersion = "${{ steps.meta.outputs.version }}"
+          $verParts = @([regex]::Matches($rawVersion, '\d+') | ForEach-Object { $_.Value })
+          while ($verParts.Count -lt 4) { $verParts += '0' }
+          $msixVersion = ($verParts[0..3]) -join '.'
+
           $manifest = @"
           <?xml version="1.0" encoding="utf-8"?>
           <Package
@@ -451,7 +455,7 @@ jobs:
               xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
               xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
               IgnorableNamespaces="uap rescap">
-              <Identity Name="FufuLauncher.Preview" Publisher="CN=FufuLauncher" Version="$version" ProcessorArchitecture="x64" />
+              <Identity Name="FufuLauncher.Preview" Publisher="CN=FufuLauncher" Version="$msixVersion" ProcessorArchitecture="x64" />
               <Properties>
                   <DisplayName>FufuLauncher Preview</DisplayName>
                   <PublisherDisplayName>FufuLauncher</PublisherDisplayName>
@@ -492,7 +496,7 @@ jobs:
               exit $LASTEXITCODE
           }
 
-          Write-Output "Created unsigned MSIX: $msixPath"
+          Write-Output "Created unsigned MSIX: $msixPath (Version: $msixVersion)"
 
       - name: Upload installer
         uses: actions/upload-artifact@v4

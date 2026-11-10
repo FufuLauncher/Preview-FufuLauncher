@@ -332,6 +332,7 @@ jobs:
     runs-on: windows-latest
     outputs:
       exe_name: ${{ steps.meta.outputs.exe_name }}
+      version: ${{ steps.meta.outputs.version }}
       release_tag: ${{ steps.meta.outputs.release_tag }}
       release_title: ${{ steps.meta.outputs.release_title }}
     env:
@@ -385,6 +386,7 @@ jobs:
           Move-Item -LiteralPath $exeFile.FullName -Destination "installer-staging\$newExeName" -Force
 
           "exe_name=$([System.IO.Path]::GetFileNameWithoutExtension($newExeName))" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
           "release_tag=$releaseTag" >> $env:GITHUB_OUTPUT
           "release_title=$releaseTitle" >> $env:GITHUB_OUTPUT
 
@@ -393,11 +395,117 @@ jobs:
           "- **Release Title**: ``$releaseTitle``" >> $env:GITHUB_STEP_SUMMARY
           "- **Generated Installer**: **$newExeName**" >> $env:GITHUB_STEP_SUMMARY
 
+      - name: Create unsigned MSIX package
+        shell: pwsh
+        run: |
+          $stagingDir = Join-Path $env:RUNNER_TEMP "FufuLauncher-MSIX"
+          New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
+          robocopy $env:OUTPUT_DIR $stagingDir /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+          if ($LASTEXITCODE -ge 8) {
+              Write-Output "::error::Failed to stage assembled files for MSIX (robocopy exit code $LASTEXITCODE)"
+              exit 1
+          }
+          if (-not (Test-Path (Join-Path $stagingDir "FufuLauncher.exe"))) {
+              Write-Output "::error::FufuLauncher.exe is missing from the assembled output"
+              exit 1
+          }
+
+          $assetsDir = Join-Path $stagingDir "Assets"
+          New-Item -ItemType Directory -Force -Path $assetsDir | Out-Null
+          Add-Type -AssemblyName System.Drawing
+          $sourceIcon = Join-Path $env:GITHUB_WORKSPACE "FufuLauncher\Assets\icon.png"
+          if (-not (Test-Path $sourceIcon)) {
+              Write-Output "::error::FufuLauncher\Assets\icon.png is missing"
+              exit 1
+          }
+          $sourceImage = [System.Drawing.Image]::FromFile($sourceIcon)
+          try {
+              $side = [Math]::Min($sourceImage.Width, $sourceImage.Height)
+              $sourceRect = [System.Drawing.Rectangle]::new(
+                  [int](($sourceImage.Width - $side) / 2),
+                  [int](($sourceImage.Height - $side) / 2),
+                  $side,
+                  $side
+              )
+              foreach ($size in @(150, 44)) {
+                  $bitmap = [System.Drawing.Bitmap]::new($size, $size, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+                  $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+                  try {
+                      $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                      $graphics.DrawImage($sourceImage, [System.Drawing.Rectangle]::new(0, 0, $size, $size), $sourceRect, [System.Drawing.GraphicsUnit]::Pixel)
+                      $bitmap.Save((Join-Path $assetsDir "Square${size}x${size}Logo.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+                  } finally {
+                      $graphics.Dispose()
+                      $bitmap.Dispose()
+                  }
+              }
+          } finally {
+              $sourceImage.Dispose()
+          }
+
+          $version = "${{ steps.meta.outputs.version }}"
+          $manifest = @"
+          <?xml version="1.0" encoding="utf-8"?>
+          <Package
+              xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+              xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+              xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+              IgnorableNamespaces="uap rescap">
+              <Identity Name="FufuLauncher.Preview" Publisher="CN=FufuLauncher" Version="$version" ProcessorArchitecture="x64" />
+              <Properties>
+                  <DisplayName>FufuLauncher Preview</DisplayName>
+                  <PublisherDisplayName>FufuLauncher</PublisherDisplayName>
+                  <Logo>Assets\Square150x150Logo.png</Logo>
+              </Properties>
+              <Dependencies>
+                  <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+              </Dependencies>
+              <Resources>
+                  <Resource Language="en-US" />
+              </Resources>
+              <Applications>
+                  <Application Id="FufuLauncher" Executable="FufuLauncher.exe" EntryPoint="Windows.FullTrustApplication">
+                      <uap:VisualElements DisplayName="FufuLauncher Preview" Description="FufuLauncher Preview" BackgroundColor="transparent" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" />
+                  </Application>
+              </Applications>
+              <Capabilities>
+                  <rescap:Capability Name="runFullTrust" />
+              </Capabilities>
+          </Package>
+          "@
+          $manifestPath = Join-Path $stagingDir "AppxManifest.xml"
+          [System.IO.File]::WriteAllText($manifestPath, $manifest, [System.Text.UTF8Encoding]::new($false))
+
+          $makeAppx = Get-ChildItem "$env:ProgramFiles(x86)\Windows Kits\10\bin\*\x64\MakeAppx.exe" |
+                      Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+                      Select-Object -First 1
+          if (-not $makeAppx) {
+              Write-Output "::error::MakeAppx.exe was not found in the installed Windows SDK"
+              exit 1
+          }
+
+          $shortSha = "${{ needs.prepare.outputs.short_sha }}"
+          $msixPath = Join-Path $env:GITHUB_WORKSPACE "installer-staging\FufuLauncher-Preview-$shortSha.msix"
+          & $makeAppx.FullName pack /d $stagingDir /p $msixPath /o
+          if ($LASTEXITCODE -ne 0) {
+              Write-Output "::error::MakeAppx failed to create the MSIX package"
+              exit $LASTEXITCODE
+          }
+
+          Write-Output "Created unsigned MSIX: $msixPath"
+
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.meta.outputs.exe_name }}
           path: installer-staging/*.exe
+          if-no-files-found: error
+
+      - name: Upload MSIX package
+        uses: actions/upload-artifact@v4
+        with:
+          name: FufuLauncher-MSIX
+          path: installer-staging/*.msix
           if-no-files-found: error
 
   package-portable:
@@ -469,6 +577,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ${{ needs.package-installer.outputs.exe_name }}
+          path: release-assets
+
+      - name: Download MSIX package
+        uses: actions/download-artifact@v4
+        with:
+          name: FufuLauncher-MSIX
           path: release-assets
 
       - name: Download portable ZIP
@@ -557,7 +671,7 @@ jobs:
             echo '  U --> A'
             echo '  I --> A'
             echo '  C --> A'
-            echo '  A --> S[Package Installer]'
+            echo '  A --> S["Package Setup + MSIX"]'
             echo '  A --> Z[Package Portable ZIP]'
             echo '  A --> G[Package FuFuPlugin]'
             echo '  S --> R[Publish Release]'
@@ -587,7 +701,7 @@ jobs:
             echo "| Build UnlockerIsland (matrix) | ${R_UNLOCKER} |"
             echo "| Build CaptureApp | ${R_CAPTURE} |"
             echo "| Assemble | ${R_ASSEMBLE} |"
-            echo "| Package Installer | ${R_INSTALLER} |"
+            echo "| Package Setup + MSIX | ${R_INSTALLER} |"
             echo "| Package Portable ZIP | ${R_PORTABLE} |"
             echo "| Package FuFuPlugin | ${R_PLUGIN} |"
             echo "| Publish Release | ${R_RELEASE} |"

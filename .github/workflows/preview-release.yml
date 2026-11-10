@@ -476,7 +476,7 @@ jobs:
           $manifestPath = Join-Path $stagingDir "AppxManifest.xml"
           [System.IO.File]::WriteAllText($manifestPath, $manifest, [System.Text.UTF8Encoding]::new($false))
 
-          $makeAppx = Get-ChildItem "$env:ProgramFiles(x86)\Windows Kits\10\bin\*\x64\MakeAppx.exe" |
+          $makeAppx = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\MakeAppx.exe" |
                       Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
                       Select-Object -First 1
           if (-not $makeAppx) {
